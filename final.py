@@ -275,7 +275,7 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    base = Path("/Users/kook/Desktop/Blocklist_API")
+    base = Path("/Users/kook/Desktop/Blockchainsawman_Blocklist")
     model_path = base / "models/saved/elliptic_gat_best.pt"
     explainer_path = base / "models/saved/explainer_pg.pt"
 
