@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+torch
+torch_geometric
+langchain
+langchain_openai
+pydantic
+neo4j
+numpy
+pandas
+matplotlib
+networkx
