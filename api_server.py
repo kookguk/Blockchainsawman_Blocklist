@@ -42,7 +42,7 @@ class WalletRequest(BaseModel):
 ###############################
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-base = Path("/Users/kook/Desktop/블록체인쏘맨")
+base = Path("/Users/kook/Desktop/Blockchainsawman_Blocklist")
 model_path = base / "models/saved/elliptic_gat_best.pt"
 explainer_path = base / "models/saved/explainer_pg.pt"
 
