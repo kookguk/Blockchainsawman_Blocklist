@@ -1,4 +1,7 @@
 # api_server.py
+from pydantic import BaseModel
+from typing import List, Any
+
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +14,30 @@ from final import (
     load_model_and_explainer,
     run_pipeline
 )
+
+class Edge(BaseModel):
+    source: str
+    target: str
+    importance: float
+
+class Node(BaseModel):
+    id: str
+
+class EvidenceGraph(BaseModel):
+    nodes: List[Node]
+    edges: List[Edge]
+
+class WalletResult(BaseModel):
+    txId: str
+    risk_score: float
+    status: str
+    explanation: str
+    explanation_summary: str
+    explanation_bullet: List[str]
+    evidence_graph: EvidenceGraph
+
+class WalletResponse(BaseModel):
+    results: List[WalletResult]
 
 ###############################
 # FastAPI 초기화
@@ -58,9 +85,9 @@ model, explainer = load_model_and_explainer(device, model_path, explainer_path)
 ###############################
 # API 엔드포인트
 ###############################
-@app.post("/v1/check_wallet")
-def check_wallet(req: WalletRequest):
+@app.post("/v1/check_wallet", response_model=WalletResponse)
 
+def check_wallet(req: WalletRequest):
     results = []
 
     for txId in req.txIds:
