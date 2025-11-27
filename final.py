@@ -6,11 +6,10 @@ from torch_geometric.nn import GATv2Conv
 from torch_geometric.explain import Explainer, PGExplainer
 import pandas as pd
 
+from typing import TypedDict, List
 from neo4j import GraphDatabase
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import PydanticOutputParser
-from pydantic import BaseModel
 
 
 ###############################################################
@@ -63,7 +62,6 @@ def load_model_and_explainer(device, model_path, explainer_ckpt_path):
     state_dict = ckpt2.get("state_dict", ckpt2)
     explainer.algorithm.load_state_dict(state_dict)
 
-    # PGExplainer를 학습완료 상태로 강제 지정
     explainer.algorithm._curr_epoch = target_epochs
     explainer.algorithm.training = False
 
@@ -71,7 +69,16 @@ def load_model_and_explainer(device, model_path, explainer_ckpt_path):
 
 
 ###############################################################
-# 2) GNN → 중간 JSON (Explainer 결과)
+# 2) TypedDict 기반 스키마 (FastAPI와 절대 충돌 X)
+###############################################################
+class AMLAnalysis(TypedDict):
+    explanation: str
+    explanation_summary: str
+    explanation_bullet: List[str]
+
+
+###############################################################
+# 3) GNN → 중간 JSON (Explainer 결과)
 ###############################################################
 def get_explainer_output(explainer, model, x, edge_index, node_idx, idx_to_txId, y):
 
@@ -125,7 +132,7 @@ def get_explainer_output(explainer, model, x, edge_index, node_idx, idx_to_txId,
 
 
 ###############################################################
-# 3) Neo4j 2-hop Evidence Graph 생성
+# 4) Neo4j 2-hop Evidence Graph 생성
 ###############################################################
 AURA_URI = "neo4j+s://f7844108.databases.neo4j.io"
 AURA_USER = "neo4j"
@@ -181,57 +188,60 @@ def build_evidence_json(records, tx_list):
                 "entity_type": "unknown",
                 "comment": "unknown"
             }
-            edges[(tx, tx)] = {"source": tx, "target": tx,
-                               "amount": "unknown", "time": "unknown"}
+            edges[(tx, tx)] = {
+                "source": tx,
+                "target": tx,
+                "amount": "unknown",
+                "time": "unknown"
+            }
 
     return {"nodes": list(nodes.values()), "edges": list(edges.values())}
 
 
 ###############################################################
-# 4) LangChain LLM 분석
+# 5) LangChain LLM 분석 (BaseModel 제거됨)
 ###############################################################
-class AMLAnalysis(BaseModel):
-    explanation: str
-    explanation_summary: str
-    explanation_bullet: list[str]
-
-
 def analyze_with_llm(evidence_json, risk_score, txId):
 
-    parser = PydanticOutputParser(pydantic_object=AMLAnalysis)
-
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.2)
+    llm = ChatOpenAI(
+        model="gpt-4o",
+        temperature=0.2,
+    )
 
     prompt = ChatPromptTemplate.from_template("""
 당신은 블록체인 AML 분석 전문가입니다.
-지갑 {txId} 에 대한 evidence graph 데이터는 아래와 같습니다.
 
-risk_score: {risk_score}
-evidence_graph_json:
+지갑 {txId} 의 risk_score: {risk_score}
+
+evidence_graph:
 {evidence_json}
 
-출력 조건:
-- explanation_summary: 20자 이하
-- explanation_bullet: 문자열 리스트(List[str])로 3개
+아래 형식으로 출력하세요:
 
-JSON 스키마를 반드시 따르세요:
-{format_instructions}
+1) explanation: 상세 설명 (문자열)
+2) explanation_summary: 요약 (문자열, 20자 이내)
+3) explanation_bullet: ['포인트1','포인트2','포인트3']
 """)
 
     chain = prompt | llm
-
     raw = chain.invoke({
         "txId": txId,
         "risk_score": risk_score,
-        "evidence_json": json.dumps(evidence_json, ensure_ascii=False),
-        "format_instructions": parser.get_format_instructions()
+        "evidence_json": json.dumps(evidence_json, ensure_ascii=False)
     })
 
-    return parser.parse(raw.content)
+    # 문자열만 주어지므로 최소 파싱
+    content = raw.content
+
+    return {
+        "explanation": content,
+        "explanation_summary": "",
+        "explanation_bullet": []
+    }
 
 
 ###############################################################
-# 5) 파이프라인 실행 (최종 JSON만 반환)
+# 6) 파이프라인 실행 (최종 JSON만 반환)
 ###############################################################
 def run_pipeline(txid, model, explainer, x, edge_index, y, idx_to_txId):
 
@@ -240,60 +250,22 @@ def run_pipeline(txid, model, explainer, x, edge_index, y, idx_to_txId):
 
     node_idx = idx_to_txId.index(txid)
 
-    # explainer 기반 중간 evidence nodes
     mid_json = get_explainer_output(
         explainer, model, x, edge_index, node_idx, idx_to_txId, y
     )
 
     node_list = [n["id"] for n in mid_json["evidence_graph"]["nodes"]]
-
-    # Neo4j 2-hop
     records = fetch_subgraph(node_list)
     evidence_json = build_evidence_json(records, node_list)
 
-    # LLM 분석
-    llm_out = analyze_with_llm(
-        evidence_json, mid_json["risk_score"], txid
-    )
+    llm_out = analyze_with_llm(evidence_json, mid_json["risk_score"], txid)
 
-    # 최종 JSON만 반환
     return {
         "txId": txid,
         "risk_score": mid_json["risk_score"],
         "status": mid_json["status"],
-        "explanation": llm_out.explanation,
-        "explanation_summary": llm_out.explanation_summary,
-        "explanation_bullet": llm_out.explanation_bullet,
+        "explanation": llm_out["explanation"],
+        "explanation_summary": llm_out["explanation_summary"],
+        "explanation_bullet": llm_out["explanation_bullet"],
         "evidence_graph": evidence_json
     }
-
-
-###############################################################
-# 6) 실행부 (최종 JSON만 출력)
-###############################################################
-if __name__ == "__main__":
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    base = Path("/Users/kook/Desktop/Blockchainsawman_Blocklist")
-    model_path = base / "models/saved/elliptic_gat_best.pt"
-    explainer_path = base / "models/saved/explainer_pg.pt"
-
-    df = pd.read_csv(base / "data/df_merged.csv")
-    idx_to_txId = df["txId"].astype(str).tolist()
-
-    data = torch.load(base / "data/elliptic_data_v2.pt", map_location=device)
-    x, edge_index, y = data.x, data.edge_index, data.y
-
-    model, explainer = load_model_and_explainer(device, model_path, explainer_path)
-
-    user_input = input("지갑 주소 입력 (2개일 경우 쉼표로 구분): ")
-    tx_list = [t.strip() for t in user_input.split(",")]
-
-    for tx in tx_list:
-
-        result = run_pipeline(
-            tx, model, explainer, x, edge_index, y, idx_to_txId
-        )
-
-        print(json.dumps(result, indent=2, ensure_ascii=False))
